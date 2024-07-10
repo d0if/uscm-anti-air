@@ -21,6 +21,7 @@ import net.minecraft.util.math.Vec3d
 import net.minecraft.world.RaycastContext
 import java.nio.file.Path
 import kotlin.io.path.name
+import kotlin.math.floor
 
 
 object ModCommand {
@@ -68,15 +69,41 @@ object ModCommand {
                 )
                 .then(
                     literal("target")
-                        .executes(::raycastTarget)
-                        .then(
-                            argument("pos", BlockPosArgumentType.blockPos())
-                                .executes(::posTarget)
-                        )
-                        .then(
-                            argument("config", CannonConfigArgumentType())
-                                .executes(::configTarget)
-                        )
+                            .executes(::raycastTarget)
+                            .then(
+                                argument("pos", BlockPosArgumentType.blockPos())
+                                    .executes(::posTarget)
+                            )
+                            .then(
+                                argument("config", CannonConfigArgumentType())
+                                    .executes(::configTarget)
+                            )
+                            .then(
+                                literal("moving").then(
+                                    argument("direction", DirectionArgumentType())
+                                        .executes{ raycastMovingTarget(it, 10, 30) }
+                                        .then(
+                                            argument("pos", BlockPosArgumentType.blockPos())
+                                                .executes{ posMovingTarget(it, 10, 30) }
+                                                .then(
+                                                    argument("speed", IntegerArgumentType.integer(1, 999))
+                                                    .executes { posMovingTarget(it, IntegerArgumentType.getInteger(it, "speed"), 30) }
+                                                    .then(
+                                                        argument("delay", IntegerArgumentType.integer(1,120))
+                                                            .executes { posMovingTarget(it, IntegerArgumentType.getInteger(it, "speed"), IntegerArgumentType.getInteger(it, "delay")) }
+                                                    )
+                                                )
+                                        )
+                                        .then(
+                                            argument("speed", IntegerArgumentType.integer(1, 999))
+                                                .executes { raycastMovingTarget(it, IntegerArgumentType.getInteger(it, "speed"), 30) }
+                                                .then(
+                                                    argument("delay", IntegerArgumentType.integer(1,120))
+                                                        .executes { raycastMovingTarget(it, IntegerArgumentType.getInteger(it, "speed"), IntegerArgumentType.getInteger(it, "delay")) }
+                                                )
+                                        )
+                                )
+                            )
                 )
         )
     }
@@ -149,6 +176,77 @@ object ModCommand {
             -1
         } else {
             source.sendFeedback(Text.of("§aConfiguration: ${result.payload}, distance: ${result.distance}"))
+            1
+        }
+    }
+
+    private fun posMovingTarget(context: CommandContext<FabricClientCommandSource>, speed: Int, delay: Int): Int {
+
+        return setMovingTarget(getPosFromArgument(context.getArgument("pos", DefaultPosArgument::class.java), context.source), context, speed, delay)
+
+    }
+
+    private fun raycastMovingTarget(context: CommandContext<FabricClientCommandSource>, speed: Int, delay: Int): Int {
+    
+        val player = context.source.player
+        val result = player.world.raycast(
+            RaycastContext(
+                player.eyePos,
+                player.eyePos.add(player.rotationVecClient.multiply(1000.0)),
+                RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.ANY,
+                player
+            )
+        )
+
+        return if (result.type == HitResult.Type.MISS) {
+            context.source.sendError(Text.of("You are looking into nowhere..."))
+            -1
+        } else setMovingTarget(result.blockPos, context, speed, delay)
+    }
+
+    private fun setMovingTarget(pos: BlockPos, context: CommandContext<FabricClientCommandSource>, speed: Int, delay: Int): Int {
+        checkInstance()
+        checkCannon()
+        val cannon = UCSM.cannon!!
+        val origin = cannon.origin!!
+
+        val blockdistance = 20 * delay.toDouble() / speed.toDouble() //speed is in ticks/block, delay is in seconds
+
+        var travel = Vec3d(0.0, 0.0, 1.0) //"unit" vector that we will rotate using given direction. note that facing south (+z) has yaw of 0deg
+            .rotateY(Math.toRadians(context.getArgument("direction", Direction::class.java).asRotation().toDouble()).toFloat() * -1)
+            .multiply(blockdistance)
+
+        var target = Vec3d.of(pos)
+            .add(travel)
+            .subtract(
+                origin.x - 0.5,
+                origin.y - 0.5,
+                origin.z - 0.5
+            ) // Aim at the center of the block
+            .rotateY(Math.toRadians((cannon.direction!!.asRotation() + 180).toDouble()).toFloat())
+        if (cannon.mirrored!!) {
+            target = Vec3d(-target.x, target.y, target.z)
+        }
+
+        val result = cannon.getCoord(target) ?: return -1
+
+        //this is super specific to m3's cannon, but the formula is basically:
+        //fuse time = (79t for tnt fuse) + (5t for transmission between button->countdown) + (6t for redstone transmission after barrel is empty) + (parameter 2, in ticks)
+        val fusetime = result.payload.substringAfter(",").substringBefore(",").toInt() + 90
+        val launchtime = ( context.source.player.world.getTimeOfDay() + (20 * delay) - fusetime ) % 24000
+
+        //convert gameday ticks to game-time HH:MM for easier timing (many mods can display this time)
+        val lt_hr = floor(((launchtime / 1000) + 5).toDouble()) % 24 + 1
+        val lt_min = floor( (launchtime % 1000) * 0.06)
+        val lt_fmt = String.format("%02d", lt_hr.toInt()) + ":" + String.format("%02d", lt_min.toInt())
+        
+        return if (result.distance > precision) {
+            context.source.sendError(Text.of("Target will not fall within range at detonation time..."))
+            -1
+        } else {
+            context.source.sendFeedback(Text.of("§aConfiguration: ${result.payload}, distance: ${result.distance}"))
+            context.source.sendFeedback(Text.of("§bLaunch time: ${launchtime} (current day ticks)- ${lt_fmt} (in-game time)"))
             1
         }
     }
